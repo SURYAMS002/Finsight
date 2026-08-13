@@ -109,20 +109,22 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar - Credentials & Document Processing
+# Sidebar - Document Processing & Optional Credentials
 with st.sidebar:
-    st.header("🔑 Credentials")
-    api_key_input = st.text_input("Gemini API Key", type="password", help="Enter your Gemini API key if not configured in Streamlit Secrets or .env")
-    if api_key_input:
-        st.session_state["user_gemini_api_key"] = api_key_input
-
     active_api_key = get_gemini_api_key()
-    if active_api_key:
-        st.success("✓ Gemini API Key active")
-    else:
-        st.warning("⚠️ GEMINI_API_KEY required. Enter key above or add to Streamlit Cloud Secrets.")
 
-    st.markdown("---")
+    # Only display credentials box if no key is configured in Secrets or .env
+    if not active_api_key:
+        st.header("🔑 Credentials")
+        api_key_input = st.text_input("Enter Gemini API Key", type="password", help="Enter your key to unlock the agent if Secrets is not configured")
+        if api_key_input:
+            st.session_state["user_gemini_api_key"] = api_key_input
+            active_api_key = api_key_input
+            st.success("✓ Gemini API Key set!")
+        else:
+            st.warning("⚠️ GEMINI_API_KEY required. Enter key above or add to Streamlit Cloud Secrets.")
+        st.markdown("---")
+
     st.header("📄 Document Ingestion")
     
     uploaded_file = st.file_uploader("Upload Annual Report (PDF)", type=["pdf"])
@@ -175,7 +177,7 @@ with st.sidebar:
         # Check if already processed
         if st.session_state["pdf_filename"] != target_filename or not st.session_state["is_indexed"]:
             if not active_api_key:
-                st.error("Cannot index PDF: GEMINI_API_KEY is missing. Please enter your key in the Credentials box above.")
+                st.error("Cannot index PDF: GEMINI_API_KEY is missing. Please enter your key in the Credentials box above or add to Streamlit Secrets.")
             else:
                 with st.spinner(f"Extracting & Indexing '{target_filename}'..."):
                     progress_bar = st.progress(0.0, text="Extracting text from PDF pages...")
@@ -231,7 +233,7 @@ with col_run:
 if run_button and user_query:
     active_api_key = get_gemini_api_key()
     if not active_api_key:
-        st.error("⚠️ GEMINI_API_KEY is missing! Please enter your Gemini API Key in the sidebar Credentials box or set it in Streamlit Cloud Secrets.")
+        st.error("⚠️ GEMINI_API_KEY is missing! Please enter your Gemini API Key in the sidebar or set it in Streamlit Cloud Secrets.")
     elif not st.session_state["is_indexed"] or st.session_state["vector_store"] is None:
         st.error("Please upload an annual report PDF or click 'Use Sample' in the sidebar first.")
     else:
