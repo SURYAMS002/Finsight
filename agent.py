@@ -6,7 +6,7 @@ from langgraph.graph import StateGraph, END
 from google import genai
 from google.genai.errors import APIError, ClientError
 
-from config import GEMINI_API_KEY, DEFAULT_LLM_MODEL
+from config import get_gemini_api_key, DEFAULT_LLM_MODEL
 from tools.search_tool import search_report
 from tools.calculator_tool import calculator
 from tools.verify_tool import verify_evidence
@@ -27,9 +27,12 @@ class AgentState(TypedDict):
 
 # Initialize Gemini Client
 def get_gemini_client():
-    return genai.Client(api_key=GEMINI_API_KEY)
+    key = get_gemini_api_key()
+    if not key:
+        raise ValueError("GEMINI_API_KEY is missing! Please enter your Gemini API Key in the sidebar or configure Streamlit Secrets.")
+    return genai.Client(api_key=key)
 
-def call_gemini_with_retry(prompt: str, max_retries: int = 5) -> str:
+def call_gemini_with_retry(prompt: str, max_retries: int = 6) -> str:
     """
     Executes a Gemini LLM request with robust rate-limit (429) retry and multi-model fallback.
     """
@@ -52,7 +55,7 @@ def call_gemini_with_retry(prompt: str, max_retries: int = 5) -> str:
                 err_str = str(e)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                     delay_match = re.search(r"retryDelay': '(\d+)", err_str)
-                    sleep_time = int(delay_match.group(1)) + 2 if delay_match else int(backoff)
+                    sleep_time = int(delay_match.group(1)) + 3 if delay_match else int(backoff)
                     print(f"[Rate Limit 429] Model '{model}' limited. Waiting {sleep_time}s...")
                     time.sleep(sleep_time)
                     backoff *= 1.5

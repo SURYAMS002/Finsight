@@ -3,9 +3,9 @@ import time
 from typing import Dict, Any
 from google import genai
 from google.genai.errors import APIError, ClientError
-from config import GEMINI_API_KEY, DEFAULT_LLM_MODEL
+from config import get_gemini_api_key, DEFAULT_LLM_MODEL
 
-def verify_evidence(claim: str, source_evidence: str, max_retries: int = 5) -> str:
+def verify_evidence(claim: str, source_evidence: str, max_retries: int = 6) -> str:
     """
     Verify whether a proposed financial claim or calculation is strictly supported by source evidence.
     Includes rate limit retry logic and multi-model fallback.
@@ -15,7 +15,11 @@ def verify_evidence(claim: str, source_evidence: str, max_retries: int = 5) -> s
     if not source_evidence or not source_evidence.strip():
         return "Verification Result: NOT_SUPPORTED\nReason: No source evidence provided to verify the claim."
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    key = get_gemini_api_key()
+    if not key:
+        return "Verification Error: GEMINI_API_KEY is missing."
+
+    client = genai.Client(api_key=key)
 
     prompt = f"""
 You are an expert financial auditor and verification engine.
@@ -58,7 +62,7 @@ EXPLANATION: [Concise 1-3 sentence explanation of the verification outcome]
                 err_str = str(e)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                     delay_match = re.search(r"retryDelay': '(\d+)", err_str)
-                    sleep_time = int(delay_match.group(1)) + 2 if delay_match else int(backoff)
+                    sleep_time = int(delay_match.group(1)) + 3 if delay_match else int(backoff)
                     time.sleep(sleep_time)
                     backoff *= 1.5
                     continue

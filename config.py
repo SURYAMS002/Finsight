@@ -4,22 +4,29 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+def get_gemini_api_key() -> str:
+    """
+    Retrieves the Gemini API Key from:
+    1. os.getenv("GEMINI_API_KEY")
+    2. st.secrets["GEMINI_API_KEY"] (Streamlit Cloud)
+    3. st.session_state["user_gemini_api_key"] (Sidebar user input)
+    """
+    key = os.getenv("GEMINI_API_KEY")
+    if key and key != "YOUR_KEY_HERE":
+        return key
 
-# Fallback to Streamlit Cloud Secrets if os.getenv is empty
-if not GEMINI_API_KEY:
     try:
         import streamlit as st
         if "GEMINI_API_KEY" in st.secrets:
-            GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+            return st.secrets["GEMINI_API_KEY"]
+        if st.session_state.get("user_gemini_api_key"):
+            return st.session_state["user_gemini_api_key"]
     except Exception:
         pass
 
-if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_KEY_HERE":
-    raise ValueError(
-        "GEMINI_API_KEY is missing! "
-        "Please configure GEMINI_API_KEY in .env for local run or in Streamlit Cloud Secrets for deployment."
-    )
+    return ""
+
+GEMINI_API_KEY = get_gemini_api_key()
 
 # Model configuration
 DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.6-flash")

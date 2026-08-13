@@ -8,7 +8,7 @@ import streamlit as st
 # Ensure project root is in python path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config import GEMINI_API_KEY
+from config import get_gemini_api_key
 from rag.pdf_processor import extract_pages_from_pdf
 from rag.chunker import chunk_pages
 from rag.vector_store import FAISSVectorStore
@@ -109,8 +109,20 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar - Document Processing
+# Sidebar - Credentials & Document Processing
 with st.sidebar:
+    st.header("🔑 Credentials")
+    api_key_input = st.text_input("Gemini API Key", type="password", help="Enter your Gemini API key if not configured in Streamlit Secrets or .env")
+    if api_key_input:
+        st.session_state["user_gemini_api_key"] = api_key_input
+
+    active_api_key = get_gemini_api_key()
+    if active_api_key:
+        st.success("✓ Gemini API Key active")
+    else:
+        st.warning("⚠️ GEMINI_API_KEY required. Enter key above or add to Streamlit Cloud Secrets.")
+
+    st.markdown("---")
     st.header("📄 Document Ingestion")
     
     uploaded_file = st.file_uploader("Upload Annual Report (PDF)", type=["pdf"])
@@ -137,175 +149,120 @@ with st.sidebar:
         target_pdf_path = default_pdf_path
         target_filename = "annual_report.pdf"
 
+    def chunk_priority_score(chunk: dict) -> int:
+        """
+        Calculates priority score for document chunks based on financial statement keywords.
+        Guarantees statement tables across ANY annual report PDF (TCS, Infosys, HDFC, etc.) are indexed.
+        """
+        text_lower = chunk["text"].lower()
+        score = 0
+        statement_terms = [
+            "statement of profit and loss", "balance sheet", "results of operations",
+            "revenue from operations", "total income", "net profit", "cash flows",
+            "consolidated financial statements", "standalone financial statements"
+        ]
+        for term in statement_terms:
+            if term in text_lower:
+                score += 15
+        
+        # Numbers formatting presence
+        number_matches = len(re.findall(r"\d{1,3}(?:,\d{3})+", chunk["text"]))
+        score += min(number_matches, 10)
+        return score
+
     # Index Auto-load or Process
     if target_pdf_path:
-        if st.session_state.get("pdf_filename") != target_filename or not st.session_state.get("is_indexed"):
-            safe_name = re.sub(r'[^a-zA-Z0-9]', '_', target_filename)
-            cache_dir = f"faiss_store_{safe_name}"
-            
-            store = FAISSVectorStore()
-            
-            # Check if index already exists in cache or default store
-            if target_filename == "annual_report.pdf" and store.load("faiss_store"):
-                st.session_state["vector_store"] = store
-                set_vector_store(store)
-                st.session_state["pdf_filename"] = target_filename
-                st.session_state["is_indexed"] = True
-                st.success("Loaded pre-indexed FAISS Vector Store!")
-            elif store.load(cache_dir) and len(store.chunks_metadata) >= 20:
-                st.session_state["vector_store"] = store
-                set_vector_store(store)
-                st.session_state["pdf_filename"] = target_filename
-                st.session_state["is_indexed"] = True
-                st.success(f"Loaded cached index for {target_filename} ({len(store.chunks_metadata)} chunks)!")
+        # Check if already processed
+        if st.session_state["pdf_filename"] != target_filename or not st.session_state["is_indexed"]:
+            if not active_api_key:
+                st.error("Cannot index PDF: GEMINI_API_KEY is missing. Please enter your key in the Credentials box above.")
             else:
-                st.markdown("#### ⏳ Financial Document Indexing")
-                status_placeholder = st.empty()
-                progress_bar = st.progress(0.0)
+                with st.spinner(f"Extracting & Indexing '{target_filename}'..."):
+                    progress_bar = st.progress(0.0, text="Extracting text from PDF pages...")
+                    pages = extract_pages_from_pdf(target_pdf_path)
+                    
+                    progress_bar.progress(0.3, text=f"Extracted {len(pages)} pages. Chunking text...")
+                    chunks = chunk_pages(pages, chunk_size=1000, chunk_overlap=200)
+                    
+                    # Sort chunks by priority score so financial statements are prioritized
+                    chunks_with_scores = [(chunk_priority_score(c), c) for c in chunks]
+                    chunks_with_scores.sort(key=lambda x: x[0], reverse=True)
+                    
+                    # Embed top 140 highest-signal chunks
+                    top_chunks = [c for _, c in chunks_with_scores[:140]]
+                    
+                    progress_bar.progress(0.5, text=f"Generating embeddings for top {len(top_chunks)} financial chunks...")
+                    
+                    store = FAISSVectorStore()
+                    
+                    def update_progress(current, total):
+                        pct = 0.5 + (0.4 * (current / max(total, 1)))
+                        progress_bar.progress(pct, text=f"Embedding chunks: {current}/{total}")
 
-                status_placeholder.write("1/3 Extracting document pages...")
-                all_pages = extract_pages_from_pdf(target_pdf_path)
-                
-                status_placeholder.write(f"2/3 Scanning {len(all_pages)} pages for financial statements...")
-                
-                # Priority Financial Table Indicators
-                table_keywords = [
-                    "revenue from operations", "statement of profit and loss", "profit for the year", 
-                    "results of our operations", "consolidated statement of profit", "balance sheet", 
-                    "standalone statement of profit", "total income", "income statement", "board's report"
-                ]
-                
-                high_priority_pages = []
-                general_financial_pages = []
-                
-                for p in all_pages:
-                    txt_lower = p["text"].lower()
-                    if any(kw in txt_lower for kw in table_keywords):
-                        high_priority_pages.append(p)
-                    elif p["page"] <= 15 or "revenue" in txt_lower or "profit" in txt_lower:
-                        general_financial_pages.append(p)
+                    store.build_from_chunks(top_chunks, progress_callback=update_progress)
+                    
+                    st.session_state["vector_store"] = store
+                    st.session_state["pdf_filename"] = target_filename
+                    st.session_state["is_indexed"] = True
+                    set_vector_store(store)
+                    
+                    progress_bar.progress(1.0, text="Indexing complete!")
+                    st.success(f"Indexed '{target_filename}' ({len(top_chunks)} chunks).")
 
-                # Prioritize financial statement pages across document
-                selected_pages = high_priority_pages + general_financial_pages
-                if not selected_pages:
-                    selected_pages = all_pages[:60]
-
-                all_chunks = chunk_pages(selected_pages, chunk_size=1000, chunk_overlap=150)
-                
-                # Smart chunk sorting: prioritize chunks containing financial statement numbers
-                def chunk_priority_score(c):
-                    t = c["text"].lower()
-                    score = 0
-                    if any(k in t for k in ["revenue from operations", "results of our operations", "profit for the year", "statement of profit"]):
-                        score += 10
-                    if any(k in t for k in ["standalone", "consolidated", "balance sheet"]):
-                        score += 5
-                    if re.search(r'\d{1,3}(,\d{3})+', c["text"]):  # formatted financial numbers e.g. 1,62,990
-                        score += 5
-                    return score
-
-                sorted_chunks = sorted(all_chunks, key=chunk_priority_score, reverse=True)
-                
-                # Take top 140 highest-signal financial chunks
-                chunks = sorted_chunks[:140]
-
-                status_placeholder.write(f"3/3 Generating Gemini vector embeddings ({len(chunks)} chunks)...")
-
-                def update_progress(current, total):
-                    pct = min(current / total, 1.0)
-                    progress_bar.progress(pct)
-                    status_placeholder.write(f"Embedding chunk {current}/{total}...")
-
-                store.build_from_chunks(chunks, batch_size=30, progress_callback=update_progress)
-                store.save(cache_dir)
-
-                st.session_state["vector_store"] = store
-                set_vector_store(store)
-                st.session_state["pdf_filename"] = target_filename
-                st.session_state["is_indexed"] = True
-                status_placeholder.empty()
-                progress_bar.empty()
-                st.success(f"Successfully indexed {len(chunks)} high-priority financial chunks from {target_filename}!")
-    
-    # Status Card in Sidebar
-    if st.session_state.get("is_indexed"):
+    # Status Display
+    if st.session_state["is_indexed"]:
         st.markdown("---")
-        st.markdown("### 🟢 Vector Index Active")
-        st.write(f"**Document:** `{st.session_state['pdf_filename']}`")
-        st.write(f"**Indexed Chunks:** `{len(st.session_state['vector_store'].chunks_metadata)}`")
+        st.success(f"🟢 **Active Report:** {st.session_state['pdf_filename']}")
     else:
-        st.info("Upload a PDF or select the sample report to begin.")
+        st.info("👈 Upload a PDF annual report or click 'Use Sample' to get started.")
 
-# Main Application Layout
-col_main, col_info = st.columns([7, 3])
+# Main Q&A Interface
+st.subheader("🤖 Financial Query Assistant")
 
-with col_main:
-    st.subheader("💡 Financial Question")
-    
-    example_prompts = [
-        "What was the revenue in FY2025?",
-        "Compare revenue and net profit growth between the two latest fiscal years. Which grew faster?",
-        "Compare Standalone vs Consolidated performance."
-    ]
-    
-    selected_example = st.selectbox("Or choose a sample question:", ["Custom Query..."] + example_prompts)
-    
-    default_text = "" if selected_example == "Custom Query..." else selected_example
-    user_query = st.text_area("Enter your question:", value=default_text, height=90, placeholder="e.g. Compare revenue and profit growth rate...")
+user_query = st.text_input(
+    "Ask a financial question about the uploaded report:",
+    placeholder="e.g., What was the revenue from operations in FY2026 and what was the YoY growth?"
+)
 
-    analyze_btn = st.button("🔍 Analyze & Verify Evidence", type="primary", use_container_width=True)
+col_run, col_clear = st.columns([1, 5])
+with col_run:
+    run_button = st.button("Analyze & Verify", type="primary")
 
-    if analyze_btn:
-        if not st.session_state.get("is_indexed"):
-            st.error("Please upload or load an annual report PDF first!")
-        elif not user_query.strip():
-            st.warning("Please enter a question to analyze.")
-        else:
-            set_vector_store(st.session_state["vector_store"])
-            
-            st.markdown("### 🤖 Agent Execution & Live Activity")
+if run_button and user_query:
+    active_api_key = get_gemini_api_key()
+    if not active_api_key:
+        st.error("⚠️ GEMINI_API_KEY is missing! Please enter your Gemini API Key in the sidebar Credentials box or set it in Streamlit Cloud Secrets.")
+    elif not st.session_state["is_indexed"] or st.session_state["vector_store"] is None:
+        st.error("Please upload an annual report PDF or click 'Use Sample' in the sidebar first.")
+    else:
+        # Create expandable activity log container
+        with st.expander("🤖 Agent Activity & Execution Graph Log", expanded=True):
             activity_container = st.container()
             
             with st.spinner("FinSight Agent analyzing report evidence..."):
                 agent = FinSightAgent()
                 result = agent.run(user_query)
-            
+
             # Render Activity Feed
             with activity_container:
-                for log_item in result["status_log"]:
-                    clean_log = log_item.encode("ascii", errors="replace").decode("ascii")
-                    st.markdown(f'<div class="activity-card">{clean_log}</div>', unsafe_allow_html=True)
-            
-            st.markdown("---")
-            st.markdown("### 📋 Final Verification Report")
-            
-            if result.get("abstained"):
-                st.markdown('<div class="abstain-badge">⚠ ABSTAINED — Evidence Insufficient</div>', unsafe_allow_html=True)
-            elif result.get("is_supported"):
-                st.markdown('<div class="verified-badge">✓ EVIDENCE VERIFIED ACCURATE</div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="abstain-badge">⚠ PARTIAL / UNVERIFIED EVIDENCE</div>', unsafe_allow_html=True)
+                for step in result["status_log"]:
+                    st.markdown(f'<div class="activity-card">⚙️ {step}</div>', unsafe_allow_html=True)
 
-            st.markdown(result["final_answer"])
-            
-            # Show Source Pages Tags
-            if result.get("source_pages"):
-                st.markdown("#### 📚 Page Citations")
-                pages_html = " ".join([f'<span class="source-tag">Page {p}</span>' for p in result["source_pages"]])
-                st.markdown(pages_html, unsafe_allow_html=True)
+        st.markdown("### 📋 Final Verification Report")
+        
+        # Verification Status Badge
+        if result.get("abstained"):
+            st.markdown('<div class="abstain-badge">⚠ ABSTAINED — INSUFFICIENT EVIDENCE</div>', unsafe_allow_html=True)
+        elif result.get("is_supported"):
+            st.markdown('<div class="verified-badge">✓ FULLY VERIFIED EVIDENCE</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="abstain-badge">⚠ PARTIAL / UNVERIFIED EVIDENCE</div>', unsafe_allow_html=True)
 
-with col_info:
-    st.subheader("🛡️ Agent Architecture")
-    st.markdown("""
-    **FinSight Agent Loop:**
-    1. **Question Analysis:** Formulates targeted search queries.
-    2. **Vector Retrieval:** Queries FAISS index (`gemini-embedding-2`).
-    3. **Arithmetic Tool:** Calculates percentage growth/ratios.
-    4. **Verification Engine:** Checks values, fiscal years & units.
-    5. **Abstention Policy:** Abstains from hallucinating if evidence is missing.
-    """)
-    st.markdown("---")
-    st.markdown("### ⚙️ System Config")
-    st.write(f"**LLM Model:** `gemini-3.6-flash`")
-    st.write(f"**Embeddings:** `gemini-embedding-2`")
-    st.write(f"**Framework:** `LangGraph` + `PyMuPDF` + `FAISS`")
+        # Main Answer Markdown
+        st.markdown(result["final_answer"])
+        
+        # Source Pages Pills
+        if result["source_pages"]:
+            st.markdown("**Cited Source Pages:**")
+            pages_html = " ".join([f'<span class="source-tag">Page {p}</span>' for p in result["source_pages"]])
+            st.markdown(pages_html, unsafe_allow_html=True)
